@@ -8,14 +8,17 @@ extern "C" volatile uint32_t native_adreno_pool_stats[8],native_adreno_pool_stat
 extern "C" volatile uint32_t native_adreno_wc_enabled,native_adreno_pool_wc;
 static const uint64_t kIovas[GpuBufferCount]={GpuSqeIova,GpuRingIova,GpuMemptrsIova,GpuPwrupIova,GpuScratchIova};
 static const size_t kBytes[GpuBufferCount]={GpuSqeBytes,GpuRingBytes,GpuPageBytes,GpuPageBytes,GpuPageBytes};
-IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
-    const uint16_t sids[2],void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
+IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const ArmSmmu4KStream *routes,
+    size_t route_count,void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
 {
     if(!report)return kIOReturnBadArgument;
     *report={};
     if(used_)return kIOReturnBusy;
-    if(!io || !slots || !sids || bank>63 || !asid || asid>0xffff || slots[0]>127 || slots[1]>127 ||
-        slots[0]==slots[1])return kIOReturnBadArgument;
+    if(!io || !routes || !route_count || route_count>8 || bank>63 || !asid || asid>0xffff)return kIOReturnBadArgument;
+    for(size_t i=0;i<route_count;++i) {
+        if(routes[i].slot>127)return kIOReturnBadArgument;
+        for(size_t j=0;j<i;++j)if(routes[i].slot==routes[j].slot)return kIOReturnBadArgument;
+    }
     used_=true;
     IOReturn status=kIOReturnSuccess;
     auto step=[&](Step s) {report->step=s;if(progress)progress(s);};
@@ -59,8 +62,7 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     }
     if(!status) {
         step(Attach);
-        const ArmSmmu4KStream routes[2]={{slots[0],sids[0]},{slots[1],sids[1]}};
-        status=smmu_.attach(routes,2);
+        status=smmu_.attach(routes,route_count);
         const ArmSmmu4KStreamResult *s=smmu_.streamResult();
         report->route_status=smmu_.attachStatus();
         report->route_phase=s->phase;report->route_writes=s->writes;report->routes_verified=s->streams_verified;
@@ -87,20 +89,29 @@ IOReturn NativeAdrenoGpuContext::bringUp(const ArmSmmu4KIo *io,unsigned bank,uns
     return status;
 }
 static NativeAdrenoGpuContext *board_gpu_context;
-extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,
-    unsigned slot0,unsigned sid0,unsigned slot1,unsigned sid1,void (*progress)(uint32_t),
-    NativeAdrenoGmuContextReport *report)
+extern "C" IOReturn NativeAdrenoGpuContextBringupRoutes(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,
+    const unsigned *slots,const unsigned *sids,unsigned count,void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report)
 {
     static ArmSmmu4KMmio mmio;
     static ArmSmmu4KIo io;
-    if(!report || board_gpu_context || !smmu || !bytes || sid0>0xffff || sid1>0xffff)return kIOReturnBadArgument;
+    if(!report || board_gpu_context || !smmu || !bytes || !slots || !sids || !count || count>8)return kIOReturnBadArgument;
+    ArmSmmu4KStream routes[8];
+    for(unsigned i=0;i<count;++i) {
+        if(sids[i]>0xffff)return kIOReturnBadArgument;
+        routes[i]={slots[i],uint16_t(sids[i])};
+    }
     mmio={reinterpret_cast<volatile unsigned char *>(smmu),bytes};
     if(ArmSmmu4KBindMmio(&mmio,&io)!=ArmSmmu4KSuccess)return kIOReturnBadArgument;
     board_gpu_context=new NativeAdrenoGpuContext;
     if(!board_gpu_context)return kIOReturnNoMemory;
-    const unsigned slots[2]={slot0,slot1};
-    const uint16_t sids[2]={uint16_t(sid0),uint16_t(sid1)};
-    return board_gpu_context->bringUp(&io,bank,asid,slots,sids,progress,report);
+    return board_gpu_context->bringUp(&io,bank,asid,routes,count,progress,report);
+}
+extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,
+    unsigned slot0,unsigned sid0,unsigned slot1,unsigned sid1,void (*progress)(uint32_t),
+    NativeAdrenoGmuContextReport *report)
+{
+    const unsigned slots[2]={slot0,slot1},sids[2]={sid0,sid1};
+    return NativeAdrenoGpuContextBringupRoutes(smmu,bytes,bank,asid,slots,sids,2,progress,report);
 }
 extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5])
 {

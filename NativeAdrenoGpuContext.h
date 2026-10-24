@@ -33,9 +33,10 @@ public:
     NativeAdrenoGpuContext()=default;
     NativeAdrenoGpuContext(const NativeAdrenoGpuContext &)=delete;
     NativeAdrenoGpuContext &operator=(const NativeAdrenoGpuContext &)=delete;
-    /* The report is the GMU context's: route counts cover both streams. */
-    IOReturn bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const unsigned slots[2],
-        const uint16_t sids[2],void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report);
+    /* The report is the GMU context's: route counts cover every stream. Routes (SMR slot and exact stream ID, 1..8) as the
+     * GMU context's: pipa's GPU iommus <0 0x401> is four streams, 0, 1, 0x400 and 0x401. */
+    IOReturn bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const ArmSmmu4KStream *routes,size_t route_count,
+        void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report);
     bool ready() const {return ready_;}
     const NativeAdrenoMemory &buffer(unsigned index) const {return buffers_[index];}
     NativeAdrenoVm *vm() {return ready_?&vm_:nullptr;}
@@ -43,6 +44,9 @@ public:
 extern "C" IOReturn NativeAdrenoGpuContextBringup(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,
     unsigned slot0,unsigned sid0,unsigned slot1,unsigned sid1,void (*progress)(uint32_t),
     NativeAdrenoGmuContextReport *report);
+/* The same with several routes (slots[i] matches sids[i]), count 1..8. */
+extern "C" IOReturn NativeAdrenoGpuContextBringupRoutes(volatile uint8_t *smmu,size_t bytes,unsigned bank,unsigned asid,
+    const unsigned *slots,const unsigned *sids,unsigned count,void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report);
 /* sqe, ring, memptrs, pwrup, scratch: physical base, size and GPU address, only after Ready. */
 extern "C" IOReturn NativeAdrenoGpuContextBuffers(NativeAdrenoGpuBuffer out[5]);
 /* The live VM of the ready GPU context (null before Ready), for the user-client core. */
