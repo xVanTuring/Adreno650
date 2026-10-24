@@ -40,9 +40,11 @@ public:
     NativeAdrenoGmuContext()=default;
     NativeAdrenoGmuContext(const NativeAdrenoGmuContext &)=delete;
     NativeAdrenoGmuContext &operator=(const NativeAdrenoGmuContext &)=delete;
-    /* One attempt per object. progress (may be null) is called before each step. */
-    IOReturn bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,unsigned slot,
-        uint16_t sid,void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report);
+    /* One attempt per object. progress (may be null) is called before each step. Every route (an SMR slot and its
+     * exact stream ID, at most 8) points at the bank: a board whose GMU stream carries a mask (pipa's iommus
+     * <5 0x400>: stream 5 through either GPU TBU) gives each stream the mask matches its own route. */
+    IOReturn bringUp(const ArmSmmu4KIo *io,unsigned bank,unsigned asid,const ArmSmmu4KStream *routes,
+        size_t route_count,void (*progress)(uint32_t step),NativeAdrenoGmuContextReport *report);
     bool ready() const {return ready_;}
     NativeAdrenoGmuAllocator &allocator() {return gmu_;}
     NativeAdrenoVm &vm() {return vm_;}
@@ -52,6 +54,10 @@ public:
 extern "C" IOReturn NativeAdrenoGmuContextBringup(volatile uint8_t *smmu,size_t bytes,
     unsigned bank,unsigned asid,unsigned slot,unsigned sid,void (*progress)(uint32_t),
     NativeAdrenoGmuContextReport *report);
+/* The same with several routes (slots[i] matches sids[i]), count 1..8. */
+extern "C" IOReturn NativeAdrenoGmuContextBringupRoutes(volatile uint8_t *smmu,size_t bytes,
+    unsigned bank,unsigned asid,const unsigned *slots,const unsigned *sids,unsigned count,
+    void (*progress)(uint32_t),NativeAdrenoGmuContextReport *report);
 /* The payloads of the context the board entry built, in ShengGmuConfig order (icache, dummy, debug,
  * log, hfi): physical base, size and GMU address of each physically contiguous object. Only after
  * that context reached Ready. The GMU maps them Normal non-cacheable (MAIR index 0), as Linux maps

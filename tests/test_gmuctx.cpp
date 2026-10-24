@@ -34,6 +34,7 @@ static int write32(void *,size_t at,uint32_t v)
 static int write64(void *,size_t at,uint64_t v)
 {CHECK(at%8==0 && at<=SMMU_BYTES-8);if(peer.frozen && at==peer.frozen)return 0;std::memcpy(mmio+at/4,&v,8);return 0;}
 static int barrier(void *){return 0;}
+static const ArmSmmu4KStream gmu_route[1]={{2,5}};   /* SMR slot 2, stream 5 */
 static unsigned steps[16],step_count;
 static void progress(uint32_t step){CHECK(step_count<16);steps[step_count++]=step;}
 int main()
@@ -44,7 +45,7 @@ int main()
         reset();step_count=0;
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(&io,1,1,2,5,progress,&report)==kIOReturnSuccess);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,progress,&report)==kIOReturnSuccess);
         CHECK(report.step==NativeAdrenoGmuContext::Ready && report.status==kIOReturnSuccess && context.ready());
         CHECK(step_count==7);
         for(unsigned i=0;i<7;++i)CHECK(steps[i]==i+1);
@@ -61,7 +62,7 @@ int main()
         CHECK(report.ttbr0==((uint64_t(1)<<48)|context.allocator().tables().spans()[0].physical));
         uint64_t ttbr1;std::memcpy(&ttbr1,mmio+(cb+0x28)/4,8);
         CHECK((ttbr1&0x0000fffffffff000)==0);
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,&report)==kIOReturnBusy);   /* one attempt per object */
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,&report)==kIOReturnBusy);   /* one attempt per object */
     }
     /* A S2CR that reads back other than FAULT (the apps SMMU stored BYPASS writes as FAULT; here the reverse
      * case) is refused at attach, after the bank was programmed; the SMR stays invalid. */
@@ -70,7 +71,7 @@ int main()
         mmio[(0xc00+8)/4]=0x10000;
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,&report)!=kIOReturnSuccess);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,&report)!=kIOReturnSuccess);
         CHECK(report.step==NativeAdrenoGmuContext::Attach && report.program_enabled && !report.routes_verified);
         CHECK(!(mmio[(0x800+8)/4]&(1u<<31)) && !context.ready());
     }
@@ -79,7 +80,7 @@ int main()
         reset();peer.frozen=cb+0x30;   /* TCR */
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,&report)!=kIOReturnSuccess);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,&report)!=kIOReturnSuccess);
         CHECK(report.step==NativeAdrenoGmuContext::Program && !report.program_enabled);
         CHECK(report.mismatch==(1u<<2) && report.image.tcr==0);   /* only TCR differs; the banner names it */
         CHECK(!(mmio[cb/4]&1) && !(mmio[(0x800+8)/4]&(1u<<31)));
@@ -89,7 +90,7 @@ int main()
         reset();mmio[cb/4]=1;
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,&report)!=kIOReturnSuccess);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,&report)!=kIOReturnSuccess);
         CHECK(report.step==NativeAdrenoGmuContext::Program && report.program_writes==0);
     }
     /* A 36-bit OAS gives a 36-bit context (TCR2.PASize 1) and allocations below 2^36. */
@@ -97,7 +98,7 @@ int main()
         reset();mmio[0x28/4]=0x1413;   /* OAS code 1 */
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,&report)==kIOReturnSuccess && report.output_bits==36);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,&report)==kIOReturnSuccess && report.output_bits==36);
         CHECK((mmio[(cb+0x10)/4]&7)==1);
         CHECK(context.allocator().tables().spans()[0].physical+0x1000*NativeAdrenoGmuContext::TablePages<=(UINT64_C(1)<<36));
     }
@@ -106,7 +107,7 @@ int main()
         reset();mmio[0x28/4]=0x14f3;
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,&report)==kIOReturnUnsupported);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,&report)==kIOReturnUnsupported);
         CHECK(report.step==NativeAdrenoGmuContext::Allocate && !context.allocator().ready() && !(mmio[cb/4]&1));
     }
     /* No AArch64 4 KiB granule (ID2.PTFS_4K clear): the kit refuses in phase 1 with no write, the case int-006
@@ -115,7 +116,7 @@ int main()
         reset();mmio[0x28/4]=0x0433;
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,&report)!=kIOReturnSuccess);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,&report)!=kIOReturnSuccess);
         CHECK(report.step==NativeAdrenoGmuContext::Program && report.program_phase==1 && report.program_writes==0);
         CHECK(report.program_status==ArmSmmu4KUnsupported);
     }
@@ -125,21 +126,35 @@ int main()
         reset();mmio[0x28/4]=0x5511;peer.tbi=1;
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,&report)==kIOReturnSuccess && report.step==NativeAdrenoGmuContext::Ready);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,&report)==kIOReturnSuccess && report.step==NativeAdrenoGmuContext::Ready);
         CHECK(report.output_bits==36 && mmio[(cb+0x10)/4]==0x38071 && report.mismatch==((1u<<3)|(1u<<8)));
         CHECK(mmio[cb/4]==0x167);
         CHECK(report.smr==((1u<<31)|5) && (report.s2cr&0xff)==1 && (report.sctlr&1));
+    }
+    /* pipa: the GMU stream 5 under the mask 0x400 (iommus <5 0x400>) as two exact routes, 5 on SMR slot 2 and 0x405 on
+     * slot 3, both translating to bank 1. */
+    {
+        reset();
+        const ArmSmmu4KStream routes[2]={{2,5},{3,0x405}};
+        NativeAdrenoGmuContext context;
+        NativeAdrenoGmuContextReport report;
+        CHECK(context.bringUp(&io,1,1,routes,2,nullptr,&report)==kIOReturnSuccess && report.routes_verified==2);
+        CHECK(mmio[(0x800+8)/4]==((1u<<31)|5) && mmio[(0x800+12)/4]==((1u<<31)|0x405));
+        CHECK((mmio[(0xc00+8)/4]&0xff)==1 && (mmio[(0xc00+12)/4]&0xff)==1);
     }
     /* Argument refusals touch nothing. */
     {
         reset();
         NativeAdrenoGmuContext context;
         NativeAdrenoGmuContextReport report;
-        CHECK(context.bringUp(nullptr,1,1,2,5,nullptr,&report)==kIOReturnBadArgument);
-        CHECK(context.bringUp(&io,64,1,2,5,nullptr,&report)==kIOReturnBadArgument);
-        CHECK(context.bringUp(&io,1,0,2,5,nullptr,&report)==kIOReturnBadArgument);
-        CHECK(context.bringUp(&io,1,1,128,5,nullptr,&report)==kIOReturnBadArgument);
-        CHECK(context.bringUp(&io,1,1,2,5,nullptr,nullptr)==kIOReturnBadArgument);
+        const ArmSmmu4KStream bad_slot[1]={{128,5}};
+        CHECK(context.bringUp(nullptr,1,1,gmu_route,1,nullptr,&report)==kIOReturnBadArgument);
+        CHECK(context.bringUp(&io,64,1,gmu_route,1,nullptr,&report)==kIOReturnBadArgument);
+        CHECK(context.bringUp(&io,1,0,gmu_route,1,nullptr,&report)==kIOReturnBadArgument);
+        CHECK(context.bringUp(&io,1,1,bad_slot,1,nullptr,&report)==kIOReturnBadArgument);
+        CHECK(context.bringUp(&io,1,1,gmu_route,0,nullptr,&report)==kIOReturnBadArgument);
+        CHECK(context.bringUp(&io,1,1,nullptr,1,nullptr,&report)==kIOReturnBadArgument);
+        CHECK(context.bringUp(&io,1,1,gmu_route,1,nullptr,nullptr)==kIOReturnBadArgument);
         CHECK(report.step==0);
     }
     /* The board entry over the kit's direct MMIO adapter on a plain array. A plain array has no
@@ -158,7 +173,7 @@ int main()
         CHECK(NativeAdrenoGmuContextPayloads(nullptr)==kIOReturnBadArgument);
     }
     std::printf("PASS: 1 complete GMU context bring-up with exact routes and TTBR0, 1 non-FAULT S2CR, 1 ignored "
-        "context write, 1 enabled-bank refusal, 1 36-bit OAS context, 1 sheng-observed ID2/TCR2 context, 2 ID2 refusals, 5 argument refusals and 1 board entry with a stuck fault status over a software SMMU peer\n");
+        "context write, 1 enabled-bank refusal, 1 36-bit OAS context, 1 sheng-observed ID2/TCR2 context, 2 ID2 refusals, 1 two-route context, 7 argument refusals and 1 board entry with a stuck fault status over a software SMMU peer\n");
 }
 /* Physical-page maintenance (imported BOs): record it; no host page is touched. */
 /* Host double: the page attribute change of user BOs has no host equivalent (no host page is touched). */
