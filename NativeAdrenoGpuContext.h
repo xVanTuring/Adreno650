@@ -12,10 +12,13 @@
  *   pwrup    the a7xx power-up register list (cpu_gpu_lock header + pairs), R+W
  *   scratch  one page the first submissions may write, R+W
  * All mappings are Normal non-cacheable (Linux maps kernel BOs write-combined) and outer shareable; the CPU must use
- * a matching non-cacheable view. Bank, ASID, SMR slots and stream IDs are caller inputs. Nothing is torn down. */
+ * a matching non-cacheable view. Bank, ASID, SMR slots and stream IDs are caller inputs. Nothing is torn down.
+ * The buffers lie at 32 MiB and up, as Linux keeps every GPU address below 16 MiB free (msm's address space starts at SZ_16M):
+ * the a650 family's GMEM is reached through the UCHE at 0 (Linux reports GMEM base 0 and leaves UCHE_GMEM_RANGE alone), and the
+ * SQE buffer at 1 MiB would lie inside that window. */
 enum : uint64_t {
-    GpuSqeIova=0x100000, GpuRingIova=0x200000, GpuMemptrsIova=0x300000, GpuPwrupIova=0x301000,
-    GpuScratchIova=0x302000, GpuApertureBytes=0x80000000
+    GpuSqeIova=0x2000000, GpuRingIova=0x2100000, GpuMemptrsIova=0x2200000, GpuPwrupIova=0x2201000,
+    GpuScratchIova=0x2202000, GpuApertureBytes=0x80000000
 };
 enum : size_t {GpuSqeBytes=0x13000, GpuRingBytes=0x8000, GpuPageBytes=0x1000, GpuBufferCount=5};
 struct NativeAdrenoGpuBuffer {uint64_t physical,bytes,iova;};
