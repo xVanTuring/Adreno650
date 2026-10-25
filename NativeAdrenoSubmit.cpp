@@ -21,6 +21,12 @@ extern "C" {volatile uint32_t native_adreno_wc_audit[6];}
 extern "C" {volatile uint32_t native_adreno_fence_wait[8];}
 /* The IBs of the last submissions: [slot] fence, iova low/high, bytes, then the first 28 dwords of the first IB (read as the kernel maps it). */
 extern "C" {volatile uint32_t native_adreno_ib_log[4][4+28];volatile uint32_t native_adreno_ib_log_count;}
+/* Where a submission's time goes, in mach_absolute_time ticks summed over the successful ones (pipa 2026-10-25: Turnip's Submit call took
+ * about 1 to 1.4 ms on the render thread): [0] the buffers' validation, [1] the sweep of completed jobs and the job references, [2] the
+ * write-combine re-assertion and audit, [3] the BO publication (cache maintenance), [4] the TLB invalidation, [5] the IB record and the
+ * ring write; [6] the count. */
+extern "C" {volatile uint64_t native_adreno_submit_phase[7];}
+extern "C" uint64_t mach_absolute_time(void);
 IOReturn NativeAdrenoSubmit::poison()
 {
     poisoned_=true;return kIOReturnIOError;
@@ -78,6 +84,7 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
     if(!fence)return kIOReturnBadArgument;*fence=0;
     if(!attached_ || poisoned_)return kIOReturnNotReady;
     if(!buffers || !count || count>SubmitMaxBuffers)return kIOReturnBadArgument;
+    uint64_t phase[7];phase[0]=mach_absolute_time();
     /* Every buffer is validated against the live VM before any reference. */
     uint64_t handles[SubmitMaxBuffers];size_t handle_count=0;
     uint32_t words[SubmitMaxBuffers*(1+SubmitIbWords)];size_t word_count=0;
@@ -101,6 +108,7 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         for(size_t j=0;j<handle_count;++j)if(handles[j]==buffer.handle) {known=true;break;}
         if(!known)handles[handle_count++]=buffer.handle;
     }
+    phase[1]=mach_absolute_time();
     IOReturn swept=retireCompleted();
     if(swept)return swept;
     Job *job=free();
@@ -113,6 +121,7 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         }
         ++stats_.references_held;
     }
+    phase[2]=mach_absolute_time();
     uint32_t value=0;
     /* int-070: the first IB word as the kernel's cacheable alias and DRAM see it before any maintenance, then DRAM after the CPU
      * caches over every mapped BO are cleaned and invalidated. The board shows the last submission's record on a stall. */
@@ -151,8 +160,10 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
             native_adreno_wc_distrusted=native_adreno_coherence[0]+1;
         }
     }
+    phase[3]=mach_absolute_time();
     (void)vm_->sampleWord(buffers[0].iova,&cached,&before);
     IOReturn status=vm_->publishMapped();
+    phase[4]=mach_absolute_time();
     if(!status) {
         (void)vm_->sampleWord(buffers[0].iova,&ignored,&after);
         native_adreno_coherence[0]=native_adreno_coherence[0]+1;
@@ -165,6 +176,7 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
         }
         status=vm_->invalidateTlb();
     }
+    phase[5]=mach_absolute_time();
     if(status) {
         for(size_t i=0;i<handle_count;++i) {vm_->retireJobAfterCompletion(handles[i]);++stats_.references_retired;}
         return status;
@@ -193,6 +205,9 @@ IOReturn NativeAdrenoSubmit::submit(const NativeAdrenoSubmitBuffer *buffers,size
     for(size_t i=0;i<handle_count;++i)job->handles[i]=handles[i];
     job->count=handle_count;job->fence=value;job->queue=queue;job->active=true;
     ++stats_.submissions;
+    phase[6]=mach_absolute_time();
+    for(unsigned i=0;i<6;++i)native_adreno_submit_phase[i]=native_adreno_submit_phase[i]+(phase[i+1]-phase[i]);
+    native_adreno_submit_phase[6]=native_adreno_submit_phase[6]+1;
     if(outstanding()>stats_.peak_jobs)stats_.peak_jobs=outstanding();
     *fence=value;
     return kIOReturnSuccess;

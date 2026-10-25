@@ -55,6 +55,9 @@ class NativeAdrenoVm final {
     unsigned budget_=0;
     uint64_t next_handle_=1;
     bool attached_=false,poisoned_=false,distrust_write_combined_=false;
+    /* When the read-only imports were last cleaned at a submission (mach_absolute_time), while their clients own them
+     * (native_adreno_readonly_imports_owned): they are cleaned at most every 50 ms then, not at every submission. */
+    uint64_t readonly_cleaned_=0;
     NativeAdrenoVmResult result_{};
     ArmSmmu4KLiveRegion region(unsigned) const;
     ArmSmmu4KStatus observe() const;

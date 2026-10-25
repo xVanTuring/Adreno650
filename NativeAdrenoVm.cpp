@@ -6,13 +6,19 @@ extern "C" {int (*native_adreno_dram_read32)(uint64_t,uint32_t *);int (*native_a
     int (*native_adreno_line_audit)(uint64_t,size_t,uint32_t *,uint32_t *);}
 #include <string.h>
 #include <IOKit/IOLib.h>
+#ifdef KERNEL
+#include <kern/clock.h>
+#endif
 /* 1 once the board proved the GPU's cacheable inner-shareable accesses coherent with the CPU's caches in both directions (the A740's
  * ADRENO_QUIRK_HAS_CACHED_COHERENT behind the dma-coherent GPU SMMU, which Linux maps with IOMMU_CACHE): a mapping with write-back
  * attributes then needs no CPU cache maintenance. 0 keeps every mapping maintained as before. Counters: maintenance passes skipped for
  * coherent mappings at map, unmap, submission and completion. */
 extern "C" {volatile uint32_t native_adreno_io_coherent;volatile uint32_t native_adreno_coherent_skips[4];
 /* A board without IO coherence sets this to treat its GPU-written imports as the coherent ones are treated below. */
-volatile uint32_t native_adreno_written_imports_owned;}
+volatile uint32_t native_adreno_written_imports_owned;
+/* And this when its clients clean the read-only imports themselves before a submission (pipa: the Metal frontend cleans each IOSurface
+ * whose seed changed, NativeBridgeMetalFrontend.mm flushSurfaces): no cleaning of them per submission after the one at map. */
+volatile uint32_t native_adreno_readonly_imports_owned;}
 static bool coherentMapping(unsigned writeback) {return writeback && native_adreno_io_coherent;}
 /* GPU-written imports (render targets) are mapped non-coherent (the GPU stopped inside its end-of-pass clean writing them through
  * write-back mappings), and the CPU never touches their pixels while the GPU owns them: they were cleaned when mapped and need no
@@ -23,7 +29,8 @@ static bool coherentMapping(unsigned writeback) {return writeback && native_adre
 static bool importedUntouched(const NativeAdrenoMemory *memory,unsigned permissions)
 {
     return memory->imported() &&
-        (native_adreno_io_coherent || (native_adreno_written_imports_owned && (permissions&ArmSmmu4KWrite)));
+        (native_adreno_io_coherent || (native_adreno_written_imports_owned && (permissions&ArmSmmu4KWrite)) ||
+         (native_adreno_readonly_imports_owned && !(permissions&ArmSmmu4KWrite)));
 }
 static bool overlap(uint64_t a,uint64_t ab,uint64_t b,uint64_t bb)
 {return a<b+bb && b<a+ab;}
@@ -340,10 +347,27 @@ IOReturn NativeAdrenoVm::invalidateTlb()
 IOReturn NativeAdrenoVm::publishMapped()
 {
     if(!attached_ || poisoned_)return kIOReturnNotReady;
+    /* The read-only imports (the apps' CPU-drawn content, mostly CA's shared memory as no-copy buffers) while their clients own them:
+     * the frontend cleans the IOSurfaces whose seed changed, and the rest are cleaned here at most every 50 ms instead of at every
+     * submission (2026-10-25: about 7 MB and 1.2 ms a submission). Content an owner rewrites in place without a new import then reaches
+     * the GPU within about 50 ms; new content is cleaned when it is mapped. */
+    bool readonlyDue=false;
+    if(native_adreno_readonly_imports_owned) {
+#ifdef KERNEL
+        uint64_t period=0;nanoseconds_to_absolutetime(50ull*1000*1000,&period);
+        const uint64_t now=mach_absolute_time();
+        if(now-readonly_cleaned_>=period){readonlyDue=true;readonly_cleaned_=now;}
+#else
+        readonlyDue=true;   /* the host model keeps every submission's cleaning */
+#endif
+    }
     for(size_t i=0;i<NativeAdrenoVmMaxObjects;++i) {
         const Mapping &m=mappings_[i];
         if(!m.memory)continue;
-        if(coherentMapping(m.writeback) || importedUntouched(m.memory,m.permissions)) {native_adreno_coherent_skips[2]=native_adreno_coherent_skips[2]+1;continue;}
+        if(coherentMapping(m.writeback) || importedUntouched(m.memory,m.permissions)) {
+            const bool readonlyImport=m.memory->imported() && !(m.permissions&ArmSmmu4KWrite) && !native_adreno_io_coherent;
+            if(!(readonlyDue && readonlyImport)) {native_adreno_coherent_skips[2]=native_adreno_coherent_skips[2]+1;continue;}
+        }
         if(m.memory->publishForDevice(0,m.memory->bytes(),true,distrust_write_combined_))return fail(ArmSmmu4KIoError);
     }
     return kIOReturnSuccess;
